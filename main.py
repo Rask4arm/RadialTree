@@ -152,37 +152,51 @@ def flatten_tree(node, parent=None, nodes=None, edges=None):
 
 def make_tree_context(tree):
     nodes, edges = flatten_tree(tree)
+
     graph = nx.Graph()
     graph.add_nodes_from(nodes)
     graph.add_edges_from(edges)
+
+    # Preserve original parent relationships
+    original_parent = {
+        child: parent
+        for parent, child in edges
+    }
 
     class_order = list(dict.fromkeys(
         meta["class"]
         for meta in nodes.values()
         if meta["class"] is not None
     ))
+
     colors = {
         label: PALETTE[i % len(PALETTE)]
         for i, label in enumerate(class_order)
     }
     colors["other"] = "#A0A0A0"
 
-    return nodes, edges, graph, class_order, colors
+    return nodes, edges, graph, class_order, colors, original_parent
 
 
-def orient_from_root(graph, root_id):
-    """Orient every node away from the chosen root."""
+def orient_from_root(graph, root_id, original_parent):
+    """Orient tree away from root, excluding its former parent branch."""
+
     if root_id not in graph:
         root_id = next(iter(graph.nodes))
 
     children = {node_id: [] for node_id in graph.nodes}
+
+    # Get the root's original parent
+    excluded = original_parent.get(root_id)
+
     visited = {root_id}
     queue = [root_id]
 
     for current in queue:
         for neighbor in graph.neighbors(current):
-            if neighbor in visited:
+            if neighbor == excluded or neighbor in visited:
                 continue
+
             visited.add(neighbor)
             children[current].append(neighbor)
             queue.append(neighbor)
@@ -275,11 +289,11 @@ def tree_positions(root_id, children):
 def make_tree_figure(tree, root_id, selected_ids):
     import math
 
-    nodes, _, graph, class_order, colors = make_tree_context(tree)
+    nodes, _, graph, class_order, colors, original_parent = make_tree_context(tree)
     if root_id not in nodes:
         root_id = tree["id"]
 
-    children = orient_from_root(graph, root_id)
+    children = orient_from_root(graph, root_id, original_parent)
     counts = class_counts(children, nodes)
     positions, _ = tree_positions(root_id, children)
 
@@ -416,8 +430,8 @@ def make_tree_figure(tree, root_id, selected_ids):
 
 
 def make_comparison_figure(tree, selected_ids, root_id):
-    nodes, _, graph, class_order, colors = make_tree_context(tree)
-    children = orient_from_root(graph, root_id)
+    nodes, _, graph, class_order, colors, original_parent = make_tree_context(tree)
+    children = orient_from_root(graph, root_id, original_parent)
     counts = class_counts(children, nodes)
     fig = go.Figure()
 
@@ -671,7 +685,7 @@ def generate_tree(_clicks, stored_data, hierarchy_columns, class_column, root_na
             class_column=class_column,
             root_name=root_name or "Dataset",
         )
-        nodes, _, _, class_order, _ = make_tree_context(tree)
+        nodes, _, _, class_order, _, _ = make_tree_context(tree)
 
         status = (
             f"Tree generated successfully: {len(nodes):,} nodes, "
@@ -792,7 +806,7 @@ def update_legend(tree):
     if not tree:
         return "Classification colors will appear here."
 
-    _, _, _, class_order, colors = make_tree_context(tree)
+    _, _, _, class_order, colors, _ = make_tree_context(tree)
     if not class_order:
         return "No classification column selected."
 
