@@ -18,7 +18,6 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 from dash import ALL, Dash, Input, Output, State, ctx, dcc, html, no_update
-import dash_daq as daq
 import dash_bootstrap_components as dbc
 
 
@@ -453,6 +452,12 @@ def make_comparison_figure(tree, selected_ids, root_id, color_overrides=None):
     else:
         for row, node_id in enumerate(selected_ids[:2]):
             counter = counts[node_id]
+            parent_id = original_parent.get(node_id)
+
+            if parent_id and parent_id in nodes:
+                node_label = f"{nodes[parent_id]['name']}-{nodes[node_id]['name']}"
+            else:
+                node_label = nodes[node_id]["name"]
             total = sum(counter.values())
 
             if total == 0:
@@ -472,7 +477,7 @@ def make_comparison_figure(tree, selected_ids, root_id, color_overrides=None):
 
                 percentage = value / total
                 fig.add_trace(go.Bar(
-                    x=[percentage], y=[nodes[node_id]["name"]],
+                    x=[percentage], y=[node_label],
                     orientation="h", name=class_name,
                     marker_color=colors.get(class_name, colors["other"]),
                     text=[f"{percentage:.1%}"], textposition="inside",
@@ -822,18 +827,37 @@ def update_comparison(tree, selected, root_id, class_colors):
     Input("selected-nodes", "data"),
     Input("tree-store", "data"),
 )
+
 def update_status(selected, tree):
     if not tree or not selected:
         return "Selected: none — click up to two nodes to compare."
 
-    nodes, *_ = make_tree_context(tree)
-    names = [nodes[node_id]["name"] for node_id in selected if node_id in nodes]
+    nodes, _, _, _, _, original_parent = make_tree_context(tree)
+
+    def get_node_label(node_id):
+        name = nodes[node_id]["name"]
+        parent_id = original_parent.get(node_id)
+
+        if parent_id and parent_id in nodes:
+            parent_name = nodes[parent_id]["name"]
+            return f"{parent_name}-{name}"
+
+        return name
+
+    names = [
+        get_node_label(node_id)
+        for node_id in selected
+        if node_id in nodes
+    ]
 
     if len(names) == 1:
         return f"Selected: {names[0]} — select one more node."
+
     if len(names) >= 2:
         return f"Comparing: {names[0]} and {names[1]}"
+
     return "Selected: none."
+
 
 
 @app.callback(
