@@ -12,13 +12,14 @@ optionally select a classification column, and generate an interactive tree.
 import base64
 import io
 from collections import Counter
-from pathlib import Path
 
 import networkx as nx
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
-from dash import Dash, Input, Output, State, ctx, dcc, html, no_update
+from dash import ALL, Dash, Input, Output, State, ctx, dcc, html, no_update
+import dash_daq as daq
+import dash_bootstrap_components as dbc
 
 
 EDGE_COLOR = "#17658A"
@@ -150,7 +151,7 @@ def flatten_tree(node, parent=None, nodes=None, edges=None):
     return nodes, edges
 
 
-def make_tree_context(tree):
+def make_tree_context(tree, color_overrides=None):
     nodes, edges = flatten_tree(tree)
 
     graph = nx.Graph()
@@ -173,6 +174,10 @@ def make_tree_context(tree):
         label: PALETTE[i % len(PALETTE)]
         for i, label in enumerate(class_order)
     }
+    # Apply user-selected colors while retaining automatic defaults for new classes.
+    for label, color in (color_overrides or {}).items():
+        if label in class_order and isinstance(color, str) and color.startswith("#"):
+            colors[label] = color
     colors["other"] = "#A0A0A0"
 
     return nodes, edges, graph, class_order, colors, original_parent
@@ -269,7 +274,7 @@ def tree_positions(root_id, children):
             depth[child] = depth[current] + 1
             queue.append(child)
 
-    radius_step = 3.2
+    radius_step = 5.0
     positions = {
         node_id: (
             0.0 if depth[node_id] == 0
@@ -286,10 +291,12 @@ def tree_positions(root_id, children):
 # Figures
 # ---------------------------------------------------------------------
 
-def make_tree_figure(tree, root_id, selected_ids):
+def make_tree_figure(
+    tree, root_id, selected_ids,
+    color_overrides=None, show_names=True):
     import math
 
-    nodes, _, graph, class_order, colors, original_parent = make_tree_context(tree)
+    nodes, _, graph, class_order, colors, original_parent = make_tree_context(tree, color_overrides)
     if root_id not in nodes:
         root_id = tree["id"]
 
@@ -381,6 +388,13 @@ def make_tree_figure(tree, root_id, selected_ids):
                 layer="above",
             )
 
+        if show_names:
+            fig.add_annotation(
+                x=x, y=y, text=meta["name"], showarrow=False,
+                xanchor="center", yanchor="middle",
+                font=dict(size=10, color="#111111"),
+            )
+
         label_x.append(x)
         label_y.append(y)
         label_text.append(meta["name"])
@@ -400,13 +414,6 @@ def make_tree_figure(tree, root_id, selected_ids):
         marker=dict(size=42, color="rgba(0,0,0,0.01)", line=dict(width=0)),
         customdata=click_custom, text=click_text,
         hovertemplate="%{text}<extra></extra>", showlegend=False,
-    ))
-
-    fig.add_trace(go.Scatter(
-        x=label_x, y=label_y, mode="text",
-        text=label_text, textposition="middle center",
-        textfont=dict(size=10, color="#111111"),
-        hoverinfo="skip", showlegend=False,
     ))
 
     max_radius = max(
@@ -429,8 +436,10 @@ def make_tree_figure(tree, root_id, selected_ids):
     return fig
 
 
-def make_comparison_figure(tree, selected_ids, root_id):
-    nodes, _, graph, class_order, colors, original_parent = make_tree_context(tree)
+def make_comparison_figure(tree, selected_ids, root_id, color_overrides=None):
+    nodes, _, graph, class_order, colors, original_parent = make_tree_context(
+        tree, color_overrides
+    )
     children = orient_from_root(graph, root_id, original_parent)
     counts = class_counts(children, nodes)
     fig = go.Figure()
@@ -454,31 +463,36 @@ def make_comparison_figure(tree, selected_ids, root_id):
                 )
                 continue
 
+            # Normalize each node independently: every bar totals 100%,
+            # regardless of the absolute number of descendant leaves.
             for class_name in class_order:
                 value = counter.get(class_name, 0)
                 if value <= 0:
                     continue
 
+                percentage = value / total
                 fig.add_trace(go.Bar(
-                    x=[value], y=[nodes[node_id]["name"]],
+                    x=[percentage], y=[nodes[node_id]["name"]],
                     orientation="h", name=class_name,
                     marker_color=colors.get(class_name, colors["other"]),
-                    text=[str(value)], textposition="inside",
+                    text=[f"{percentage:.1%}"], textposition="inside",
                     hovertemplate=(
-                        f"{class_name}: %{{x}} (%{{customdata:.1%}})"
+                        f"{class_name}: %{{x:.1%}} ({value} leaves)"
                         "<extra></extra>"
                     ),
-                    customdata=[value / total],
-                    showlegend=(row == 0),
+                    showlegend=False,
                 ))
 
     fig.update_layout(
         barmode="stack", title="Selected node comparison",
         margin=dict(l=20, r=15, t=75, b=35), height=260,
         paper_bgcolor="white", plot_bgcolor="white",
-        xaxis_title="Number of descendant leaves",
+        xaxis=dict(
+            title="Percentage of classified descendant leaves",
+            range=[0, 1], tickformat=".0%",
+        ),
         yaxis=dict(autorange="reversed"),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
+        showlegend=False,
     )
     return fig
 
@@ -523,6 +537,7 @@ app.layout = html.Div(
         dcc.Store(id="tree-store"),
         dcc.Store(id="current-root", data="root"),
         dcc.Store(id="selected-nodes", data=[]),
+        dcc.Store(id="class-colors", data={}),
 
         html.Div(
             style={
@@ -594,9 +609,12 @@ app.layout = html.Div(
                             id="comparison-graph",
                             config={"displaylogo": False},
                         ),
+                        html.Hr(),
+                        html.H3("Classification colors"),
                         html.Div(
-                            id="class-legend",
-                            style={"fontWeight": "bold", "marginTop": "10px"},
+                            "Generate a tree with a classification column to customize colors.",
+                            id="class-color-controls",
+                            style={"marginTop": "10px"},
                         ),
                     ],
                 ),
@@ -606,6 +624,15 @@ app.layout = html.Div(
                         "borderRadius": "8px",
                     },
                     children=[
+                        dcc.Checklist(
+                            id="show-node-names",
+                            options=[
+                                {"label": "Show node names", "value": "show"}
+                            ],
+                            value=["show"],
+                            inline=True,
+                            style={"margin": "10px 5px"},
+                        ),
                         dcc.Graph(
                             id="tree-graph",
                             config={
@@ -665,6 +692,7 @@ def load_csv(contents, filename):
     Output("tree-store", "data"),
     Output("current-root", "data", allow_duplicate=True),
     Output("selected-nodes", "data", allow_duplicate=True),
+    Output("class-colors", "data"),
     Output("generation-status", "children"),
     Input("generate-tree", "n_clicks"),
     State("data-store", "data"),
@@ -675,7 +703,7 @@ def load_csv(contents, filename):
 )
 def generate_tree(_clicks, stored_data, hierarchy_columns, class_column, root_name):
     if not stored_data:
-        return no_update, no_update, no_update, "Upload a CSV first."
+        return no_update, no_update, no_update, no_update, "Upload a CSV first."
 
     try:
         df = pd.read_json(io.StringIO(stored_data["records"]), orient="records")
@@ -685,15 +713,16 @@ def generate_tree(_clicks, stored_data, hierarchy_columns, class_column, root_na
             class_column=class_column,
             root_name=root_name or "Dataset",
         )
-        nodes, _, _, class_order, _, _ = make_tree_context(tree)
+        nodes, _, _, class_order, default_colors, _ = make_tree_context(tree)
+        user_colors = {label: default_colors[label] for label in class_order}
 
         status = (
             f"Tree generated successfully: {len(nodes):,} nodes, "
             f"{len(class_order)} classification categories."
         )
-        return tree, tree["id"], [], status
+        return tree, tree["id"], [], user_colors, status
     except Exception as exc:
-        return no_update, no_update, no_update, f"Could not generate tree: {exc}"
+        return no_update, no_update, no_update, no_update, f"Could not generate tree: {exc}"
 
 
 @app.callback(
@@ -753,8 +782,10 @@ def update_root(_make_clicks, _reset_clicks, selected, current_root, tree):
     Input("tree-store", "data"),
     Input("current-root", "data"),
     Input("selected-nodes", "data"),
+    Input("class-colors", "data"),
+    Input("show-node-names", "value"),
 )
-def update_tree_figure(tree, root_id, selected):
+def update_tree_figure(tree, root_id, selected, class_colors, show_names):
     if not tree:
         fig = go.Figure()
         fig.add_annotation(
@@ -764,7 +795,13 @@ def update_tree_figure(tree, root_id, selected):
         fig.update_layout(height=820, paper_bgcolor="white")
         return fig
 
-    return make_tree_figure(tree, root_id or tree["id"], selected or [])
+    return make_tree_figure(
+        tree,
+        root_id or tree["id"],
+        selected or [],
+        class_colors,
+        show_names="show" in (show_names or [])
+    )
 
 
 @app.callback(
@@ -772,11 +809,12 @@ def update_tree_figure(tree, root_id, selected):
     Input("tree-store", "data"),
     Input("selected-nodes", "data"),
     Input("current-root", "data"),
+    Input("class-colors", "data"),
 )
-def update_comparison(tree, selected, root_id):
+def update_comparison(tree, selected, root_id, class_colors):
     if not tree:
         return go.Figure()
-    return make_comparison_figure(tree, selected or [], root_id or tree["id"])
+    return make_comparison_figure(tree, selected or [], root_id or tree["id"], class_colors)
 
 
 @app.callback(
@@ -799,29 +837,88 @@ def update_status(selected, tree):
 
 
 @app.callback(
-    Output("class-legend", "children"),
+    Output("class-color-controls", "children"),
     Input("tree-store", "data"),
+    State("class-colors", "data"),
 )
-def update_legend(tree):
-    if not tree:
-        return "Classification colors will appear here."
 
-    _, _, _, class_order, colors, _ = make_tree_context(tree)
+def render_class_color_controls(tree, saved_colors):
+    if not tree:
+        return "Generate a tree with a classification column to customize colors."
+
+    _, _, _, class_order, default_colors, _ = make_tree_context(tree)
     if not class_order:
         return "No classification column selected."
 
-    return html.Div([
-        html.Span("Class colors: "),
-        *[
-            html.Span(
-                f"■ {label}  ",
-                style={"color": colors[label], "marginRight": "10px"},
+    saved_colors = saved_colors or {}
+
+    return html.Div(
+        [
+            html.Div(
+                [
+                    html.Span(
+                        label,
+                        style={
+                            "fontSize": "14px",
+                            "fontWeight": "500",
+                            "color": "#333",
+                        },
+                    ),
+
+                    dbc.Input(
+                        id={"type": "class-color", "class": label},
+                        type="color",
+                        value=saved_colors.get(
+                            label, default_colors[label]
+                        ),
+                        style={
+                            "width": "38px",
+                            "height": "32px",
+                            "padding": "3px",
+                            "border": "1px solid #ddd",
+                            "borderRadius": "7px",
+                            "cursor": "pointer",
+                            "backgroundColor": "white",
+                        },
+                    ),
+                ],
+                style={
+                    "display": "flex",
+                    "alignItems": "center",
+                    "justifyContent": "space-between",
+                    "padding": "8px 4px",
+                    "borderBottom": "1px solid #eee",
+                },
             )
             for label in class_order
         ],
-    ])
+        style={
+            "maxWidth": "350px",
+        },
+    )
+
+
+
+
+@app.callback(
+    Output("class-colors", "data", allow_duplicate=True),
+    Input({"type": "class-color", "class": ALL}, "value"),
+    State({"type": "class-color", "class": ALL}, "id"),
+    State("class-colors", "data"),
+    prevent_initial_call=True,
+)
+def save_class_colors(values, picker_ids, current_colors):
+    updated = dict(current_colors or {})
+
+    for picker_id, value in zip(picker_ids or [], values or []):
+        label = picker_id.get("class")
+
+        if label and value:
+            updated[label] = value
+
+    return updated
+
 
 
 if __name__ == "__main__":
     app.run(debug=True)
-
